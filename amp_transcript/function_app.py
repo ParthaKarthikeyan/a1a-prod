@@ -421,6 +421,16 @@ class TranscriptionWorkflow:
         elif "words" in transcript_data and transcript_data["words"]:
             current_speaker = None
             current_text: List[str] = []
+            segment_start_time = None
+            segment_end_time = None
+
+            def format_timestamp(ms: int) -> str:
+                """Convert milliseconds to HH:MM:SS format"""
+                total_seconds = ms // 1000
+                hours = total_seconds // 3600
+                minutes = (total_seconds % 3600) // 60
+                seconds = total_seconds % 60
+                return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
             for word in transcript_data["words"]:
                 # VoiceGain uses "spk" for speaker ID
@@ -431,20 +441,36 @@ class TranscriptionWorkflow:
                     word_text = word_text.strip()
                 if not word_text:  # Skip empty words
                     continue
+                
+                # Get word timing
+                word_start = word.get("start", 0)
+                word_duration = word.get("duration", 0)
+                word_end = word_start + word_duration
                     
                 if speaker != current_speaker:
-                    if current_text:
+                    # Save previous speaker segment with timestamps
+                    if current_text and segment_start_time is not None:
+                        start_time_str = format_timestamp(segment_start_time)
+                        end_time_str = format_timestamp(segment_end_time) if segment_end_time else format_timestamp(segment_start_time)
                         formatted_lines.append(
-                            f"Speaker {current_speaker}: {' '.join(current_text)}"
+                            f"Speaker {current_speaker} [Starttime - {start_time_str}; Endtime - {end_time_str}]: {' '.join(current_text)}"
                         )
+                    # Start new speaker segment
                     current_speaker = speaker
                     current_text = [word_text]
+                    segment_start_time = word_start
+                    segment_end_time = word_end
                 else:
                     current_text.append(word_text)
+                    # Update end time to the latest word's end time
+                    segment_end_time = word_end
 
-            if current_text:
+            # Save last speaker segment with timestamps
+            if current_text and segment_start_time is not None:
+                start_time_str = format_timestamp(segment_start_time)
+                end_time_str = format_timestamp(segment_end_time) if segment_end_time else format_timestamp(segment_start_time)
                 formatted_lines.append(
-                    f"Speaker {current_speaker}: {' '.join(current_text)}"
+                    f"Speaker {current_speaker} [Starttime - {start_time_str}; Endtime - {end_time_str}]: {' '.join(current_text)}"
                 )
         else:
             # No transcript data found
