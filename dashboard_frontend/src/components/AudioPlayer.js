@@ -45,11 +45,12 @@ function AudioPlayer({ apiUrl, connectionString, containerName }) {
     setError(null);
 
     try {
-      // Get audio URL
+      // Get audio URL - try full_path first, then construct from name
+      const blobPath = file.full_path || (file.name.startsWith('Processed/') ? file.name : `Processed/${file.name}`);
       const audioUrlResponse = await axios.post(`${apiUrl}/api/audio-url`, {
         connection_string: connectionString,
         container_name: containerName,
-        blob_name: file.full_path || `Processed/${file.name}`
+        blob_name: blobPath
       });
       setAudioUrl(audioUrlResponse.data.url);
 
