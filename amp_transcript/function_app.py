@@ -355,13 +355,24 @@ class TranscriptionWorkflow:
         response.raise_for_status()
         transcript_data = response.json()
         
-        # Handle case where transcript is returned as a list (array of sessions)
+        # Handle case where transcript is returned as a list (array of segments)
         if isinstance(transcript_data, list):
             logger.debug(f"Transcript data is a list with {len(transcript_data)} items")
             if len(transcript_data) > 0:
-                # Usually the first item contains the transcript
-                transcript_data = transcript_data[0]
-                logger.debug(f"Using first item, type: {type(transcript_data)}")
+                # If it's a list of segments, combine all words from all segments
+                # Check if items are dicts with "words" key
+                if all(isinstance(item, dict) and "words" in item for item in transcript_data):
+                    # Combine all words from all segments
+                    all_words = []
+                    for segment in transcript_data:
+                        all_words.extend(segment.get("words", []))
+                    # Create a single dict with all words
+                    transcript_data = {"words": all_words}
+                    logger.debug(f"Combined {len(all_words)} words from {len(transcript_data)} segments")
+                else:
+                    # Otherwise use first item
+                    transcript_data = transcript_data[0]
+                    logger.debug(f"Using first item, type: {type(transcript_data)}")
             else:
                 logger.warning("Transcript data is an empty list")
                 return {}
@@ -406,13 +417,18 @@ class TranscriptionWorkflow:
                 if text:  # Only add non-empty transcripts
                     formatted_lines.append(f"[{start_time:.2f}s] Speaker {speaker}: {text}")
         # Check for words (alternative format)
+        # VoiceGain uses "utterance" and "spk" instead of "text" and "speakerId"
         elif "words" in transcript_data and transcript_data["words"]:
             current_speaker = None
             current_text: List[str] = []
 
             for word in transcript_data["words"]:
-                speaker = word.get("speakerId")
-                word_text = word.get("text", "").strip()
+                # VoiceGain uses "spk" for speaker ID
+                speaker = word.get("spk") or word.get("speakerId")
+                # VoiceGain uses "utterance" for the word text
+                word_text = word.get("utterance") or word.get("text", "")
+                if word_text:
+                    word_text = word_text.strip()
                 if not word_text:  # Skip empty words
                     continue
                     
