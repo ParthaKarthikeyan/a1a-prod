@@ -1,0 +1,23 @@
+# Azurite local storage files (contain secrets)
+__azurite_db_*.json
+__blobstorage__/
+__queuestorage__/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment files
+.env
+local.settings.json
+
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+

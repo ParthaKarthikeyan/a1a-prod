@@ -1,0 +1,18 @@
+azure-functions
+azure-functions-durable
+azure-storage-blob
+requests
+# Requirements for transcription_workflow.py
+
+# HTTP requests
+requests
+
+# SQL Server connectivity
+pyodbc
+
+# Azure Blob Storage
+azure-storage-blob
+
+# JSON handling (built-in, but listed for completeness)
+# json - standard library
+
