@@ -353,7 +353,16 @@ class TranscriptionWorkflow:
         transcript_url = f"{session_url}/transcript"
         response = requests.get(transcript_url, headers=headers, timeout=30)
         response.raise_for_status()
-        return response.json()
+        transcript_data = response.json()
+        
+        # Log transcript data structure for debugging
+        logger.debug(f"Transcript data keys: {list(transcript_data.keys())}")
+        if "utterances" in transcript_data:
+            logger.debug(f"Utterances count: {len(transcript_data.get('utterances', []))}")
+        if "words" in transcript_data:
+            logger.debug(f"Words count: {len(transcript_data.get('words', []))}")
+        
+        return transcript_data
 
     def format_transcript(self, transcript_data: Dict[str, Any]) -> str:
         if self.azure_function_url:
@@ -374,33 +383,49 @@ class TranscriptionWorkflow:
     def _format_transcript_locally(self, transcript_data: Dict[str, Any]) -> str:
         formatted_lines: List[str] = []
 
-        if "utterances" in transcript_data:
+        # Check for utterances first (preferred format)
+        if "utterances" in transcript_data and transcript_data["utterances"]:
             for utterance in transcript_data["utterances"]:
                 speaker = utterance.get("speakerId", "Unknown")
                 text = utterance.get("transcript", "")
                 start_time = utterance.get("start", 0) / 1000
-                formatted_lines.append(f"[{start_time:.2f}s] Speaker {speaker}: {text}")
-        elif "words" in transcript_data:
+                if text:  # Only add non-empty transcripts
+                    formatted_lines.append(f"[{start_time:.2f}s] Speaker {speaker}: {text}")
+        # Check for words (alternative format)
+        elif "words" in transcript_data and transcript_data["words"]:
             current_speaker = None
             current_text: List[str] = []
 
             for word in transcript_data["words"]:
                 speaker = word.get("speakerId")
+                word_text = word.get("text", "").strip()
+                if not word_text:  # Skip empty words
+                    continue
+                    
                 if speaker != current_speaker:
                     if current_text:
                         formatted_lines.append(
                             f"Speaker {current_speaker}: {' '.join(current_text)}"
                         )
                     current_speaker = speaker
-                    current_text = [word.get("text", "")]
+                    current_text = [word_text]
                 else:
-                    current_text.append(word.get("text", ""))
+                    current_text.append(word_text)
 
             if current_text:
                 formatted_lines.append(
                     f"Speaker {current_speaker}: {' '.join(current_text)}"
                 )
+        else:
+            # No transcript data found
+            logger.warning("No utterances or words found in transcript data")
+            logger.debug(f"Transcript data structure: {list(transcript_data.keys())}")
+            # Return a message indicating no transcript was found
+            return "No transcript available - audio may be silent or transcription failed."
 
+        if not formatted_lines:
+            return "No transcript available - audio may be silent or transcription failed."
+        
         return "\n".join(formatted_lines)
 
     def save_transcript_to_blob(self, transcript_text: str, audio_identifier: str) -> Optional[str]:
