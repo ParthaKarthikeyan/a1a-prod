@@ -3,7 +3,7 @@ Backend API for Transcription Dashboard
 Provides endpoints for blob storage statistics and file listings
 """
 
-from flask import Flask, jsonify, request, cors
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import os
 import logging

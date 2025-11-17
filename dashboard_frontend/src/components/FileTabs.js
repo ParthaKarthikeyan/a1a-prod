@@ -8,7 +8,7 @@ function FileTabs({ pendingFiles, processedFiles, formattedTranscripts, rawTrans
   const tabs = [
     { id: 0, label: '📁 Pending Files', data: pendingFiles, count: pendingFiles.length },
     { id: 1, label: '✅ Processed Files', data: processedFiles, count: processedFiles.length },
-    { id: 2, label: '📝 Transcripts', data: { formatted: formattedTranscripts, raw: rawTranscripts } }
+    { id: 2, label: '📝 Transcripts', data: { formatted: formattedTranscripts, raw: rawTranscripts }, count: formattedTranscripts.length + rawTranscripts.length }
   ];
 
   const formatFileSize = (bytes) => {
