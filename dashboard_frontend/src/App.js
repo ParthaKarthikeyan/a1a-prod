@@ -3,7 +3,7 @@ import './App.css';
 import Dashboard from './components/Dashboard';
 import Sidebar from './components/Sidebar';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001';
 
 function App() {
   const [connectionString, setConnectionString] = useState('');

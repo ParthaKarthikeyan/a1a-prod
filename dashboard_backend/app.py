@@ -328,6 +328,6 @@ def get_recent_activity():
 
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 5000))
+    port = int(os.getenv('PORT', 5001))  # Changed to 5001 to avoid conflicts
     app.run(host='0.0.0.0', port=port, debug=True)
 
