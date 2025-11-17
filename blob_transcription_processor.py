@@ -9,8 +9,10 @@ import os
 import sys
 import logging
 import time
+import json
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Add amp_transcript to path to import TranscriptionWorkflow
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'amp_transcript'))
@@ -31,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 class CustomTranscriptionWorkflow(TranscriptionWorkflow):
-    """Extended TranscriptionWorkflow that saves to 'Transcripts' folder"""
+    """Extended TranscriptionWorkflow that saves to 'Transcripts' folder with formatted and raw subfolders"""
     
     def __init__(
         self,
@@ -50,9 +52,83 @@ class CustomTranscriptionWorkflow(TranscriptionWorkflow):
             blob_container_name=blob_container_name
         )
         self.output_folder = output_folder
+        self.raw_transcript_data = None  # Store raw transcript data
     
-    def save_transcript_to_blob(self, transcript_text: str, audio_identifier: str) -> Optional[str]:
-        """Override to save to 'Transcripts' folder instead of default path"""
+    def process_audio_file(
+        self,
+        item: Dict[str, Any],
+        sas_token: Optional[str] = None,
+        base_audio_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Override to capture and save raw transcript data along with formatted"""
+        audio_path = item.get("audiopath")
+        audio_url = item.get("audio_url")
+        chosen_base_url = base_audio_url or item.get("base_audio_url") or self.audio_base_url
+
+        response_payload: Dict[str, Any] = {
+            "audio_path": audio_path,
+            "audio_url": audio_url,
+            "success": False,
+            "status": "",
+            "transcript_blob_path": None,
+            "error": None,
+        }
+
+        try:
+            if not audio_url:
+                if not audio_path:
+                    raise ValueError("Missing 'audiopath' or 'audio_url' in work item.")
+                if not chosen_base_url:
+                    raise ValueError("Audio base URL not provided for constructing audio_url.")
+                audio_url = f"{chosen_base_url.rstrip('/')}/{audio_path.lstrip('/')}"
+            if sas_token:
+                separator = "&" if "?" in audio_url else "?"
+                audio_url = f"{audio_url}{separator}{sas_token}"
+            response_payload["audio_url"] = audio_url
+
+            transcription_response = self.submit_transcription_request(audio_url)
+            if transcription_response is None:
+                response_payload["status"] = "rate_limited"
+                return response_payload
+
+            self.session_url = transcription_response["sessions"][0]["sessionUrl"]
+            results_phase, status = self.poll_transcription_status(self.session_url)
+            response_payload["status"] = status or results_phase
+
+            if status in {"fail", "timeout"}:
+                logger.error(
+                    "Transcription %s for %s",
+                    status,
+                    audio_path or audio_url,
+                )
+                return response_payload
+
+            # Get raw transcript data
+            raw_transcript_data = self.get_transcript(self.session_url)
+            # Format transcript
+            formatted_transcript = self.format_transcript(raw_transcript_data)
+            
+            # Save both formatted and raw transcripts
+            blob_path = self.save_transcript_to_blob(
+                formatted_transcript,
+                audio_path or audio_url,
+                raw_transcript_data=raw_transcript_data
+            )
+            response_payload["transcript_blob_path"] = blob_path
+            response_payload["success"] = True
+            return response_payload
+
+        except Exception as exc:  # pylint: disable=broad-except
+            response_payload["error"] = str(exc)
+            logger.exception(
+                "Error processing audio item %s: %s",
+                audio_path or audio_url or "<unknown>",
+                exc,
+            )
+            return response_payload
+    
+    def save_transcript_to_blob(self, transcript_text: str, audio_identifier: str, raw_transcript_data: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """Override to save to 'Transcripts/formatted' and 'Transcripts/raw' folders"""
         if not self.blob_service_client:
             logger.warning(
                 "Blob connection string not configured. Skipping upload for %s.",
@@ -63,25 +139,39 @@ class CustomTranscriptionWorkflow(TranscriptionWorkflow):
         # Sanitize the audio identifier for filename
         sanitized_name = ""
         if ".mp3" in audio_identifier.lower():
-            sanitized_name = audio_identifier.replace("/", "_").replace("\\", "_").replace(".mp3", ".txt")
+            base_name = audio_identifier.replace("/", "_").replace("\\", "_").replace(".mp3", "")
+            sanitized_name = base_name + ".txt"
         elif ".wav" in audio_identifier.lower():
-            sanitized_name = audio_identifier.replace("/", "_").replace("\\", "_").replace(".wav", ".txt")
+            base_name = audio_identifier.replace("/", "_").replace("\\", "_").replace(".wav", "")
+            sanitized_name = base_name + ".txt"
         elif ".m4a" in audio_identifier.lower():
-            sanitized_name = audio_identifier.replace("/", "_").replace("\\", "_").replace(".m4a", ".txt")
+            base_name = audio_identifier.replace("/", "_").replace("\\", "_").replace(".m4a", "")
+            sanitized_name = base_name + ".txt"
         else:
             # For other formats, just replace path separators and add .txt
-            sanitized_name = audio_identifier.replace("/", "_").replace("\\", "_") + ".txt"
-
-        # Use the output_folder instead of hardcoded path
-        full_blob_path = f"{self.output_folder}/{sanitized_name}"
+            base_name = audio_identifier.replace("/", "_").replace("\\", "_")
+            sanitized_name = base_name + ".txt"
 
         container_client = self.blob_service_client.get_container_client(
             self.blob_container_name
         )
-        blob_client = container_client.get_blob_client(full_blob_path)
+        
+        # Save formatted transcript
+        formatted_path = f"{self.output_folder}/formatted/{sanitized_name}"
+        blob_client = container_client.get_blob_client(formatted_path)
         blob_client.upload_blob(transcript_text, overwrite=True)
-        logger.info("Transcript saved to blob path %s", full_blob_path)
-        return full_blob_path
+        logger.info("Formatted transcript saved to: %s", formatted_path)
+        
+        # Save raw transcript JSON if provided
+        if raw_transcript_data is not None:
+            import json
+            raw_json = json.dumps(raw_transcript_data, indent=2)
+            raw_path = f"{self.output_folder}/raw/{base_name}.json"
+            raw_blob_client = container_client.get_blob_client(raw_path)
+            raw_blob_client.upload_blob(raw_json, overwrite=True)
+            logger.info("Raw transcript saved to: %s", raw_path)
+        
+        return formatted_path
 
 
 def list_audio_files_from_blob(
@@ -245,6 +335,87 @@ def generate_blob_url(
     return blob_url
 
 
+def process_single_audio_file(
+    audio_file: Dict[str, Any],
+    connection_string: str,
+    voicegain_token: str,
+    container_name: str,
+    output_folder: str,
+    sas_token: Optional[str],
+    audio_base_url: Optional[str],
+    azure_function_url: Optional[str],
+    generate_blob_urls: bool,
+    move_to_processed: bool,
+    idx: int,
+    total: int
+) -> Dict[str, Any]:
+    """Process a single audio file - used for parallel processing"""
+    result = {
+        "audio_path": audio_file.get('audiopath'),
+        "success": False,
+        "error": None,
+        "transcript_path": None
+    }
+    
+    try:
+        logger.info(f"[{idx}/{total}] Processing: {audio_file['audiopath']}")
+        
+        # Generate blob URL if needed
+        if generate_blob_urls and not audio_file.get('audio_url'):
+            try:
+                blob_url = generate_blob_url(
+                    connection_string=connection_string,
+                    container_name=container_name,
+                    blob_name=audio_file['audiopath'],
+                    sas_token=sas_token
+                )
+                audio_file['audio_url'] = blob_url
+            except Exception as e:
+                logger.warning(f"Could not generate blob URL for {audio_file['audiopath']}: {e}")
+                result["error"] = f"URL generation failed: {e}"
+                return result
+        
+        # Initialize workflow for this file
+        workflow = CustomTranscriptionWorkflow(
+            voicegain_bearer_token=voicegain_token,
+            blob_connection_string=connection_string,
+            blob_container_name=container_name,
+            azure_function_url=azure_function_url,
+            audio_base_url=audio_base_url,
+            output_folder=output_folder
+        )
+        
+        # Process the file (this will save both formatted and raw transcripts)
+        process_result = workflow.process_audio_file(
+            item=audio_file,
+            sas_token=sas_token,
+            base_audio_url=audio_base_url
+        )
+        
+        if process_result.get("success"):
+            result["success"] = True
+            result["transcript_path"] = process_result.get('transcript_blob_path')
+            
+            # Move file to Processed folder if enabled
+            if move_to_processed:
+                processed_path = move_blob_to_processed(
+                    connection_string=connection_string,
+                    container_name=container_name,
+                    blob_name=audio_file['audiopath']
+                )
+                if processed_path:
+                    logger.info(f"[{idx}/{total}] ✓ Moved to: {processed_path}")
+        else:
+            result["error"] = process_result.get("error") or process_result.get("status", "Unknown error")
+            logger.error(f"[{idx}/{total}] ✗ Failed: {audio_file['audiopath']} - {result['error']}")
+            
+    except Exception as e:
+        result["error"] = str(e)
+        logger.exception(f"[{idx}/{total}] Exception processing {audio_file.get('audiopath', 'unknown')}: {e}")
+    
+    return result
+
+
 def process_blob_audio_files(
     connection_string: str,
     voicegain_token: str,
@@ -256,7 +427,8 @@ def process_blob_audio_files(
     azure_function_url: Optional[str] = None,
     generate_blob_urls: bool = True,
     max_files: Optional[int] = None,
-    move_to_processed: bool = True
+    move_to_processed: bool = True,
+    max_workers: int = 5
 ):
     """
     Main function to process audio files from Azure Blob Storage.
@@ -273,6 +445,7 @@ def process_blob_audio_files(
         generate_blob_urls: If True, automatically generate blob URLs with SAS tokens
         max_files: Optional limit on number of files to process (None = process all)
         move_to_processed: If True, move successfully processed files to "Processed" folder
+        max_workers: Number of parallel workers for processing (default: 5)
     """
     logger.info("="*80)
     logger.info("Azure Blob Transcription Processor")
@@ -303,82 +476,76 @@ def process_blob_audio_files(
         audio_files = audio_files[:max_files]
         logger.info(f"Limited to processing first {len(audio_files)} files")
     
-    # Initialize transcription workflow
-    workflow = CustomTranscriptionWorkflow(
-        voicegain_bearer_token=voicegain_token,
-        blob_connection_string=connection_string,
-        blob_container_name=container_name,
-        azure_function_url=azure_function_url,
-        audio_base_url=audio_base_url,
-        output_folder=output_folder
-    )
+    # Pre-generate blob URLs for all files (can be done in parallel)
+    logger.info("Generating blob URLs for all files...")
+    for audio_file in audio_files:
+        if generate_blob_urls and not audio_file.get('audio_url'):
+            try:
+                blob_url = generate_blob_url(
+                    connection_string=connection_string,
+                    container_name=container_name,
+                    blob_name=audio_file['audiopath'],
+                    sas_token=sas_token
+                )
+                audio_file['audio_url'] = blob_url
+            except Exception as e:
+                logger.warning(f"Could not generate blob URL for {audio_file['audiopath']}: {e}")
     
-    # Process each audio file
+    logger.info("")
+    logger.info("="*80)
+    logger.info(f"Starting parallel processing with {max_workers} workers")
+    logger.info("="*80)
+    logger.info("")
+    
+    # Process files in parallel
     successful = 0
     failed = 0
     results = []
     
-    for idx, audio_file in enumerate(audio_files, 1):
-        logger.info("")
-        logger.info("="*80)
-        logger.info(f"Processing {idx}/{len(audio_files)}")
-        logger.info("="*80)
-        logger.info(f"Audio file: {audio_file['audiopath']}")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_file = {
+            executor.submit(
+                process_single_audio_file,
+                audio_file,
+                connection_string,
+                voicegain_token,
+                container_name,
+                output_folder,
+                sas_token,
+                audio_base_url,
+                azure_function_url,
+                generate_blob_urls,
+                move_to_processed,
+                idx,
+                len(audio_files)
+            ): audio_file
+            for idx, audio_file in enumerate(audio_files, 1)
+        }
         
-        try:
-            # Generate blob URL if needed
-            if generate_blob_urls and not audio_file.get('audio_url'):
-                try:
-                    blob_url = generate_blob_url(
-                        connection_string=connection_string,
-                        container_name=container_name,
-                        blob_name=audio_file['audiopath'],
-                        sas_token=sas_token
-                    )
-                    audio_file['audio_url'] = blob_url
-                    logger.info(f"Generated blob URL for audio file")
-                except Exception as e:
-                    logger.warning(f"Could not generate blob URL: {e}. Using base_audio_url if provided.")
-            
-            result = workflow.process_audio_file(
-                item=audio_file,
-                sas_token=sas_token,
-                base_audio_url=audio_base_url
-            )
-            
-            if result.get("success"):
-                successful += 1
-                logger.info(f"✓ Successfully processed: {audio_file['audiopath']}")
-                logger.info(f"  Transcript saved to: {result.get('transcript_blob_path')}")
-                
-                # Move file to Processed folder if enabled
-                if move_to_processed:
-                    processed_path = move_blob_to_processed(
-                        connection_string=connection_string,
-                        container_name=container_name,
-                        blob_name=audio_file['audiopath']
-                    )
-                    if processed_path:
-                        logger.info(f"  File moved to: {processed_path}")
-                    else:
-                        logger.warning(f"  Failed to move file to Processed folder")
-            else:
+        # Process completed tasks as they finish
+        completed = 0
+        for future in as_completed(future_to_file):
+            audio_file = future_to_file[future]
+            try:
+                result = future.result()
+                results.append(result)
+                completed += 1
+                if result.get("success"):
+                    successful += 1
+                    logger.info(f"[Progress: {completed}/{len(audio_files)}] ✓ Success: {audio_file.get('audiopath', 'unknown')}")
+                else:
+                    failed += 1
+                    logger.warning(f"[Progress: {completed}/{len(audio_files)}] ✗ Failed: {audio_file.get('audiopath', 'unknown')}")
+            except Exception as e:
                 failed += 1
-                status = result.get("status", "unknown")
-                error = result.get("error", "No error message")
-                logger.error(f"✗ Failed to process: {audio_file['audiopath']}")
-                logger.error(f"  Status: {status}, Error: {error}")
-            
-            results.append(result)
-            
-        except Exception as e:
-            failed += 1
-            logger.exception(f"Exception processing {audio_file['audiopath']}: {e}")
-            results.append({
-                "audio_path": audio_file['audiopath'],
-                "success": False,
-                "error": str(e)
-            })
+                completed += 1
+                logger.exception(f"[Progress: {completed}/{len(audio_files)}] Exception in parallel processing for {audio_file.get('audiopath', 'unknown')}: {e}")
+                results.append({
+                    "audio_path": audio_file.get('audiopath'),
+                    "success": False,
+                    "error": str(e)
+                })
     
     # Summary
     logger.info("")
@@ -423,6 +590,8 @@ def main():
     AZURE_FUNCTION_URL = os.getenv("AZURE_FUNCTION_URL")  # Optional Azure Function URL
     MAX_FILES = os.getenv("MAX_FILES")  # Optional limit on number of files to process
     MAX_FILES = int(MAX_FILES) if MAX_FILES else None
+    MAX_WORKERS = os.getenv("MAX_WORKERS", "5")  # Number of parallel workers
+    MAX_WORKERS = int(MAX_WORKERS) if MAX_WORKERS else 5
     
     # Run the processor
     process_blob_audio_files(
@@ -435,7 +604,8 @@ def main():
         audio_base_url=AUDIO_BASE_URL,
         azure_function_url=AZURE_FUNCTION_URL,
         max_files=MAX_FILES,
-        move_to_processed=True  # Move successfully processed files to Processed folder
+        move_to_processed=True,  # Move successfully processed files to Processed folder
+        max_workers=MAX_WORKERS  # Parallel processing workers
     )
 
 
