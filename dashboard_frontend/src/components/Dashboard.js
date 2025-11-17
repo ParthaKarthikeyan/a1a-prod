@@ -17,6 +17,13 @@ function Dashboard({ apiUrl, connectionString, containerName, autoRefresh, refre
   const [error, setError] = useState(null);
 
   const fetchData = async () => {
+    // Don't fetch if connection string is not configured
+    if (!connectionString || connectionString.trim() === '') {
+      setLoading(false);
+      setError('Please configure your blob connection string in the sidebar');
+      return;
+    }
+
     try {
       setLoading(true);
       setError(null);
@@ -42,10 +49,11 @@ function Dashboard({ apiUrl, connectionString, containerName, autoRefresh, refre
       setFormattedTranscripts(formattedRes.data.files || []);
       setRawTranscripts(rawRes.data.files || []);
       setRecentActivity(activityRes.data.activity || []);
+      setLoading(false);
     } catch (err) {
       console.error('Error fetching data:', err);
-      setError(err.response?.data?.error || err.message || 'Failed to fetch data');
-    } finally {
+      const errorMessage = err.response?.data?.error || err.message || 'Failed to fetch data';
+      setError(errorMessage);
       setLoading(false);
     }
   };
@@ -53,7 +61,7 @@ function Dashboard({ apiUrl, connectionString, containerName, autoRefresh, refre
   useEffect(() => {
     fetchData();
 
-    if (autoRefresh) {
+    if (autoRefresh && connectionString && connectionString.trim() !== '') {
       const interval = setInterval(fetchData, refreshInterval * 1000);
       return () => clearInterval(interval);
     }
