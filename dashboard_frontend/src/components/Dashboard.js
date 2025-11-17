@@ -118,6 +118,9 @@ function Dashboard({ apiUrl, connectionString, containerName, autoRefresh, refre
             processedFiles={processedFiles}
             formattedTranscripts={formattedTranscripts}
             rawTranscripts={rawTranscripts}
+            apiUrl={apiUrl}
+            connectionString={connectionString}
+            containerName={containerName}
           />
         </>
       )}

@@ -327,6 +327,90 @@ def get_recent_activity():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/audio-url', methods=['POST'])
+def get_audio_url():
+    """Generate a SAS URL for an audio file"""
+    try:
+        data = request.json
+        connection_string = data.get('connection_string')
+        container_name = data.get('container_name', 'audiofiles')
+        blob_name = data.get('blob_name')
+        
+        if not connection_string:
+            return jsonify({"error": "Connection string is required"}), 400
+        
+        if not blob_name:
+            return jsonify({"error": "Blob name is required"}), 400
+        
+        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        container_client = blob_service_client.get_container_client(container_name)
+        
+        # Generate SAS token
+        from datetime import timedelta
+        from azure.storage.blob import generate_container_sas, ContainerSasPermissions
+        
+        conn_parts = dict(part.split('=', 1) for part in connection_string.split(';') if '=' in part)
+        account_key = conn_parts.get('AccountKey', '')
+        account_name = blob_service_client.account_name
+        
+        if account_key:
+            sas_token = generate_container_sas(
+                account_name=account_name,
+                container_name=container_name,
+                account_key=account_key,
+                permission=ContainerSasPermissions(read=True),
+                expiry=datetime.utcnow() + timedelta(hours=24)
+            )
+            
+            blob_url = f"https://{account_name}.blob.core.windows.net/{container_name}/{blob_name}"
+            separator = "&" if "?" in blob_url else "?"
+            blob_url = f"{blob_url}{separator}{sas_token}"
+            
+            return jsonify({"url": blob_url})
+        else:
+            return jsonify({"error": "Could not generate SAS token"}), 500
+            
+    except Exception as e:
+        logger.exception("Error generating audio URL")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/transcript', methods=['POST'])
+def get_transcript():
+    """Get transcript content for a file"""
+    try:
+        data = request.json
+        connection_string = data.get('connection_string')
+        container_name = data.get('container_name', 'audiofiles')
+        transcript_path = data.get('transcript_path')
+        
+        if not connection_string:
+            return jsonify({"error": "Connection string is required"}), 400
+        
+        if not transcript_path:
+            return jsonify({"error": "Transcript path is required"}), 400
+        
+        container_client = get_blob_client(connection_string, container_name)
+        if not container_client:
+            return jsonify({"error": "Failed to connect to blob storage"}), 500
+        
+        blob_client = container_client.get_blob_client(transcript_path)
+        
+        if not blob_client.exists():
+            return jsonify({"error": "Transcript not found"}), 404
+        
+        # Download transcript content
+        transcript_content = blob_client.download_blob().readall().decode('utf-8')
+        
+        return jsonify({
+            "transcript": transcript_content,
+            "path": transcript_path
+        })
+    except Exception as e:
+        logger.exception("Error getting transcript")
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5001))  # Changed to 5001 to avoid conflicts
     app.run(host='0.0.0.0', port=port, debug=True)

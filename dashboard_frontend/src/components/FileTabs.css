@@ -72,6 +72,11 @@
   text-align: center;
 }
 
+.audio-player-tab {
+  padding: 0;
+  overflow: hidden;
+}
+
 @media (max-width: 1024px) {
   .transcripts-grid {
     grid-template-columns: 1fr;

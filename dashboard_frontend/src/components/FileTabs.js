@@ -1,14 +1,16 @@
 import React, { useState } from 'react';
 import './FileTabs.css';
 import FileTable from './FileTable';
+import AudioPlayer from './AudioPlayer';
 
-function FileTabs({ pendingFiles, processedFiles, formattedTranscripts, rawTranscripts }) {
+function FileTabs({ pendingFiles, processedFiles, formattedTranscripts, rawTranscripts, apiUrl, connectionString, containerName }) {
   const [activeTab, setActiveTab] = useState(0);
 
   const tabs = [
     { id: 0, label: '📁 Pending Files', data: pendingFiles, count: pendingFiles.length },
     { id: 1, label: '✅ Processed Files', data: processedFiles, count: processedFiles.length },
-    { id: 2, label: '📝 Transcripts', data: { formatted: formattedTranscripts, raw: rawTranscripts }, count: formattedTranscripts.length + rawTranscripts.length }
+    { id: 2, label: '📝 Transcripts', data: { formatted: formattedTranscripts, raw: rawTranscripts }, count: formattedTranscripts.length + rawTranscripts.length },
+    { id: 3, label: '🎧 Audio Player', data: null, count: 0 }
   ];
 
   const formatFileSize = (bytes) => {
@@ -119,6 +121,16 @@ function FileTabs({ pendingFiles, processedFiles, formattedTranscripts, rawTrans
                 )}
               </div>
             </div>
+          </div>
+        )}
+
+        {activeTab === 3 && (
+          <div className="tab-panel audio-player-tab">
+            <AudioPlayer 
+              apiUrl={apiUrl}
+              connectionString={connectionString}
+              containerName={containerName}
+            />
           </div>
         )}
       </div>
