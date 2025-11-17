@@ -1,0 +1,80 @@
+.file-tabs-container {
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  margin-top: 30px;
+  overflow: hidden;
+}
+
+.tabs-header {
+  display: flex;
+  background-color: #f8f9fa;
+  border-bottom: 2px solid #e0e0e0;
+}
+
+.tab-button {
+  flex: 1;
+  padding: 15px 20px;
+  background: none;
+  border: none;
+  border-bottom: 3px solid transparent;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: #555;
+  transition: all 0.3s;
+}
+
+.tab-button:hover {
+  background-color: #e9ecef;
+  color: #2c3e50;
+}
+
+.tab-button.active {
+  color: #3498db;
+  border-bottom-color: #3498db;
+  background-color: white;
+}
+
+.tabs-content {
+  padding: 20px;
+}
+
+.tab-panel h3 {
+  color: #2c3e50;
+  margin-bottom: 20px;
+  font-size: 20px;
+}
+
+.transcripts-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+.transcript-column h4 {
+  color: #555;
+  margin-bottom: 15px;
+  font-size: 16px;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 40px;
+  color: #95a5a6;
+  font-style: italic;
+}
+
+.table-note {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #7f8c8d;
+  text-align: center;
+}
+
+@media (max-width: 1024px) {
+  .transcripts-grid {
+    grid-template-columns: 1fr;
+  }
+}
+

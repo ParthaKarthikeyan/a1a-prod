@@ -1,0 +1,59 @@
+.file-table-container {
+  overflow-x: auto;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+}
+
+.file-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.file-table thead {
+  background-color: #f8f9fa;
+}
+
+.file-table th {
+  padding: 12px;
+  text-align: left;
+  font-weight: 600;
+  color: #2c3e50;
+  border-bottom: 2px solid #e0e0e0;
+}
+
+.file-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.file-table tbody tr:hover {
+  background-color: #f8f9fa;
+}
+
+.file-name {
+  color: #2c3e50;
+  max-width: 400px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-size {
+  color: #555;
+  text-align: right;
+  font-family: monospace;
+}
+
+.file-date {
+  color: #7f8c8d;
+  font-size: 12px;
+}
+
+.empty-table {
+  text-align: center;
+  padding: 40px;
+  color: #95a5a6;
+  font-style: italic;
+}
+
