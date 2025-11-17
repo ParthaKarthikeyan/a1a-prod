@@ -52,16 +52,22 @@ def get_recent_files(container_client, folder_prefix: str, limit: int = 10) -> L
     """Get recent files from a folder"""
     try:
         files = []
-        for blob in container_client.list_blobs(name_starts_with=folder_prefix):
-            files.append({
-                'name': blob.name,
-                'size': blob.size,
-                'last_modified': blob.last_modified
-            })
-        # Sort by last modified, most recent first
-        files.sort(key=lambda x: x['last_modified'], reverse=True)
+        blob_list = container_client.list_blobs(name_starts_with=folder_prefix)
+        for blob in blob_list:
+            try:
+                files.append({
+                    'name': blob.name,
+                    'size': getattr(blob, 'size', 0),
+                    'last_modified': getattr(blob, 'last_modified', None)
+                })
+            except Exception as e:
+                # Skip blobs that can't be processed
+                continue
+        # Sort by last modified, most recent first (handle None values)
+        files.sort(key=lambda x: x['last_modified'] if x['last_modified'] else datetime.min, reverse=True)
         return files[:limit]
-    except:
+    except Exception as e:
+        st.error(f"Error getting files from {folder_prefix}: {str(e)}")
         return []
 
 
@@ -273,21 +279,34 @@ def main():
     
     with tab2:
         st.subheader("Processed Files")
-        processed_files = get_recent_files(container_client, "Processed/", limit=500)
-        if processed_files:
-            processed_list = [
-                {
-                    "File Name": f['name'].split('/')[-1],
-                    "Size": format_file_size(f['size']),
-                    "Processed At": f['last_modified'].strftime("%Y-%m-%d %H:%M:%S") if f['last_modified'] else "N/A"
-                }
-                for f in processed_files
-            ]
-            processed_df = pd.DataFrame(processed_list)
-            st.dataframe(processed_df, use_container_width=True, hide_index=True)
-            st.caption(f"Showing {len(processed_files)} most recently processed files")
-        else:
-            st.info("No processed files yet")
+        try:
+            with st.spinner("Loading processed files..."):
+                processed_files = get_recent_files(container_client, "Processed/", limit=500)
+            if processed_files:
+                processed_list = []
+                for f in processed_files:
+                    try:
+                        file_name = f['name'].split('/')[-1] if '/' in f['name'] else f['name']
+                        processed_time = f['last_modified'].strftime("%Y-%m-%d %H:%M:%S") if f['last_modified'] else "N/A"
+                        processed_list.append({
+                            "File Name": file_name,
+                            "Size": format_file_size(f.get('size', 0)),
+                            "Processed At": processed_time
+                        })
+                    except Exception as e:
+                        continue
+                
+                if processed_list:
+                    processed_df = pd.DataFrame(processed_list)
+                    st.dataframe(processed_df, use_container_width=True, hide_index=True)
+                    st.caption(f"Showing {len(processed_list)} most recently processed files")
+                else:
+                    st.info("No processed files found")
+            else:
+                st.info("No processed files yet")
+        except Exception as e:
+            st.error(f"Error loading processed files: {str(e)}")
+            st.exception(e)
     
     with tab3:
         st.subheader("Transcripts")
@@ -295,37 +314,65 @@ def main():
         
         with col1:
             st.write("**Formatted Transcripts:**")
-            formatted_files = get_recent_files(container_client, "Transcripts/formatted/", limit=100)
-            if formatted_files:
-                formatted_list = [
-                    {
-                        "File Name": f['name'].split('/')[-1],
-                        "Size": format_file_size(f['size']),
-                        "Created": f['last_modified'].strftime("%Y-%m-%d %H:%M:%S") if f['last_modified'] else "N/A"
-                    }
-                    for f in formatted_files
-                ]
-                formatted_df = pd.DataFrame(formatted_list)
-                st.dataframe(formatted_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("No formatted transcripts yet")
+            try:
+                with st.spinner("Loading formatted transcripts..."):
+                    formatted_files = get_recent_files(container_client, "Transcripts/formatted/", limit=100)
+                if formatted_files:
+                    formatted_list = []
+                    for f in formatted_files:
+                        try:
+                            file_name = f['name'].split('/')[-1] if '/' in f['name'] else f['name']
+                            created_time = f['last_modified'].strftime("%Y-%m-%d %H:%M:%S") if f['last_modified'] else "N/A"
+                            formatted_list.append({
+                                "File Name": file_name,
+                                "Size": format_file_size(f.get('size', 0)),
+                                "Created": created_time
+                            })
+                        except Exception as e:
+                            continue
+                    
+                    if formatted_list:
+                        formatted_df = pd.DataFrame(formatted_list)
+                        st.dataframe(formatted_df, use_container_width=True, hide_index=True)
+                        st.caption(f"Showing {len(formatted_list)} formatted transcripts")
+                    else:
+                        st.info("No formatted transcripts found")
+                else:
+                    st.info("No formatted transcripts yet")
+            except Exception as e:
+                st.error(f"Error loading formatted transcripts: {str(e)}")
+                st.exception(e)
         
         with col2:
             st.write("**Raw Transcripts (JSON):**")
-            raw_files = get_recent_files(container_client, "Transcripts/raw/", limit=100)
-            if raw_files:
-                raw_list = [
-                    {
-                        "File Name": f['name'].split('/')[-1],
-                        "Size": format_file_size(f['size']),
-                        "Created": f['last_modified'].strftime("%Y-%m-%d %H:%M:%S") if f['last_modified'] else "N/A"
-                    }
-                    for f in raw_files
-                ]
-                raw_df = pd.DataFrame(raw_list)
-                st.dataframe(raw_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("No raw transcripts yet")
+            try:
+                with st.spinner("Loading raw transcripts..."):
+                    raw_files = get_recent_files(container_client, "Transcripts/raw/", limit=100)
+                if raw_files:
+                    raw_list = []
+                    for f in raw_files:
+                        try:
+                            file_name = f['name'].split('/')[-1] if '/' in f['name'] else f['name']
+                            created_time = f['last_modified'].strftime("%Y-%m-%d %H:%M:%S") if f['last_modified'] else "N/A"
+                            raw_list.append({
+                                "File Name": file_name,
+                                "Size": format_file_size(f.get('size', 0)),
+                                "Created": created_time
+                            })
+                        except Exception as e:
+                            continue
+                    
+                    if raw_list:
+                        raw_df = pd.DataFrame(raw_list)
+                        st.dataframe(raw_df, use_container_width=True, hide_index=True)
+                        st.caption(f"Showing {len(raw_list)} raw transcripts")
+                    else:
+                        st.info("No raw transcripts found")
+                else:
+                    st.info("No raw transcripts yet")
+            except Exception as e:
+                st.error(f"Error loading raw transcripts: {str(e)}")
+                st.exception(e)
     
     # Auto refresh
     if auto_refresh:
