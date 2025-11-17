@@ -355,14 +355,28 @@ class TranscriptionWorkflow:
         response.raise_for_status()
         transcript_data = response.json()
         
-        # Log transcript data structure for debugging
-        logger.debug(f"Transcript data keys: {list(transcript_data.keys())}")
-        if "utterances" in transcript_data:
-            logger.debug(f"Utterances count: {len(transcript_data.get('utterances', []))}")
-        if "words" in transcript_data:
-            logger.debug(f"Words count: {len(transcript_data.get('words', []))}")
+        # Handle case where transcript is returned as a list (array of sessions)
+        if isinstance(transcript_data, list):
+            logger.debug(f"Transcript data is a list with {len(transcript_data)} items")
+            if len(transcript_data) > 0:
+                # Usually the first item contains the transcript
+                transcript_data = transcript_data[0]
+                logger.debug(f"Using first item, type: {type(transcript_data)}")
+            else:
+                logger.warning("Transcript data is an empty list")
+                return {}
         
-        return transcript_data
+        # Log transcript data structure for debugging
+        if isinstance(transcript_data, dict):
+            logger.debug(f"Transcript data keys: {list(transcript_data.keys())}")
+            if "utterances" in transcript_data:
+                logger.debug(f"Utterances count: {len(transcript_data.get('utterances', []))}")
+            if "words" in transcript_data:
+                logger.debug(f"Words count: {len(transcript_data.get('words', []))}")
+        else:
+            logger.warning(f"Unexpected transcript data type: {type(transcript_data)}")
+        
+        return transcript_data if isinstance(transcript_data, dict) else {}
 
     def format_transcript(self, transcript_data: Dict[str, Any]) -> str:
         if self.azure_function_url:
