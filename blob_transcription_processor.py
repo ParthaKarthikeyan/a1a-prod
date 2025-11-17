@@ -8,6 +8,7 @@ the transcription workflow, and saves transcripts to a "Transcripts" folder.
 import os
 import sys
 import logging
+import time
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 
@@ -132,6 +133,70 @@ def list_audio_files_from_blob(
         raise
 
 
+def move_blob_to_processed(
+    connection_string: str,
+    container_name: str,
+    blob_name: str,
+    processed_folder: str = "Processed"
+) -> Optional[str]:
+    """
+    Move a blob to the "Processed" folder after successful transcription.
+    
+    Args:
+        connection_string: Azure Storage connection string
+        container_name: Name of the container
+        blob_name: Name/path of the blob to move
+        processed_folder: Folder name for processed files (default: "Processed")
+        
+    Returns:
+        New blob path if successful, None otherwise
+    """
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        container_client = blob_service_client.get_container_client(container_name)
+        
+        # Construct new blob path in Processed folder
+        # Preserve the original filename but move to Processed folder
+        original_name = blob_name.split('/')[-1]  # Get just the filename
+        new_blob_path = f"{processed_folder}/{original_name}"
+        
+        # Get source blob client
+        source_blob_client = container_client.get_blob_client(blob_name)
+        
+        # Check if source blob exists
+        if not source_blob_client.exists():
+            logger.warning(f"Source blob {blob_name} does not exist, skipping move")
+            return None
+        
+        # Get destination blob client
+        dest_blob_client = container_client.get_blob_client(new_blob_path)
+        
+        # Copy blob to new location
+        dest_blob_client.start_copy_from_url(source_blob_client.url)
+        
+        # Wait for copy to complete
+        copy_props = dest_blob_client.get_blob_properties()
+        max_wait_time = 30  # Maximum wait time in seconds
+        wait_time = 0
+        while copy_props.copy.status == 'pending' and wait_time < max_wait_time:
+            time.sleep(0.5)
+            wait_time += 0.5
+            copy_props = dest_blob_client.get_blob_properties()
+        
+        if copy_props.copy.status == 'success':
+            # Delete original blob after successful copy
+            source_blob_client.delete_blob()
+            logger.info(f"Moved {blob_name} to {new_blob_path}")
+            return new_blob_path
+        else:
+            logger.error(f"Failed to copy blob: {copy_props.copy.status}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error moving blob {blob_name} to Processed folder: {e}")
+        return None
+
+
 def generate_blob_url(
     connection_string: str,
     container_name: str,
@@ -189,7 +254,9 @@ def process_blob_audio_files(
     sas_token: Optional[str] = None,
     audio_base_url: Optional[str] = None,
     azure_function_url: Optional[str] = None,
-    generate_blob_urls: bool = True
+    generate_blob_urls: bool = True,
+    max_files: Optional[int] = None,
+    move_to_processed: bool = True
 ):
     """
     Main function to process audio files from Azure Blob Storage.
@@ -204,6 +271,8 @@ def process_blob_audio_files(
         audio_base_url: Optional base URL for constructing audio URLs
         azure_function_url: Optional Azure Function URL for transcript formatting
         generate_blob_urls: If True, automatically generate blob URLs with SAS tokens
+        max_files: Optional limit on number of files to process (None = process all)
+        move_to_processed: If True, move successfully processed files to "Processed" folder
     """
     logger.info("="*80)
     logger.info("Azure Blob Transcription Processor")
@@ -228,6 +297,11 @@ def process_blob_audio_files(
     if not audio_files:
         logger.warning("No audio files found to process")
         return
+    
+    # Limit number of files if specified
+    if max_files and max_files > 0:
+        audio_files = audio_files[:max_files]
+        logger.info(f"Limited to processing first {len(audio_files)} files")
     
     # Initialize transcription workflow
     workflow = CustomTranscriptionWorkflow(
@@ -276,6 +350,18 @@ def process_blob_audio_files(
                 successful += 1
                 logger.info(f"✓ Successfully processed: {audio_file['audiopath']}")
                 logger.info(f"  Transcript saved to: {result.get('transcript_blob_path')}")
+                
+                # Move file to Processed folder if enabled
+                if move_to_processed:
+                    processed_path = move_blob_to_processed(
+                        connection_string=connection_string,
+                        container_name=container_name,
+                        blob_name=audio_file['audiopath']
+                    )
+                    if processed_path:
+                        logger.info(f"  File moved to: {processed_path}")
+                    else:
+                        logger.warning(f"  Failed to move file to Processed folder")
             else:
                 failed += 1
                 status = result.get("status", "unknown")
@@ -335,6 +421,8 @@ def main():
     SAS_TOKEN = os.getenv("SAS_TOKEN")  # Optional SAS token for audio file access
     AUDIO_BASE_URL = os.getenv("AUDIO_BASE_URL")  # Optional base URL for audio files
     AZURE_FUNCTION_URL = os.getenv("AZURE_FUNCTION_URL")  # Optional Azure Function URL
+    MAX_FILES = os.getenv("MAX_FILES")  # Optional limit on number of files to process
+    MAX_FILES = int(MAX_FILES) if MAX_FILES else None
     
     # Run the processor
     process_blob_audio_files(
@@ -345,7 +433,9 @@ def main():
         output_folder=OUTPUT_FOLDER,
         sas_token=SAS_TOKEN,
         audio_base_url=AUDIO_BASE_URL,
-        azure_function_url=AZURE_FUNCTION_URL
+        azure_function_url=AZURE_FUNCTION_URL,
+        max_files=MAX_FILES,
+        move_to_processed=True  # Move successfully processed files to Processed folder
     )
 
 
