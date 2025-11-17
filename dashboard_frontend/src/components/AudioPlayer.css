@@ -129,9 +129,56 @@
   margin-top: 15px;
 }
 
+.play-button-container {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 15px;
+}
+
+.play-button {
+  padding: 15px 40px;
+  font-size: 18px;
+  font-weight: bold;
+  background-color: #27ae60;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.3s;
+  min-width: 150px;
+}
+
+.play-button:hover:not(:disabled) {
+  background-color: #229954;
+  transform: scale(1.05);
+}
+
+.play-button:disabled {
+  background-color: #95a5a6;
+  cursor: not-allowed;
+}
+
+.play-button.playing {
+  background-color: #e74c3c;
+}
+
+.play-button.playing:hover:not(:disabled) {
+  background-color: #c0392b;
+}
+
+.audio-info {
+  text-align: center;
+  padding: 10px;
+}
+
+.audio-status {
+  color: #555;
+  font-size: 14px;
+  margin: 0;
+}
+
 .audio-element {
-  width: 100%;
-  outline: none;
+  display: none;
 }
 
 .transcript-section {

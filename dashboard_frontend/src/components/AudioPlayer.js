@@ -10,6 +10,7 @@ function AudioPlayer({ apiUrl, connectionString, containerName }) {
   const [error, setError] = useState(null);
   const [audioUrl, setAudioUrl] = useState(null);
   const [transcriptLoading, setTranscriptLoading] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
   const audioRef = useRef(null);
 
   useEffect(() => {
@@ -39,10 +40,19 @@ function AudioPlayer({ apiUrl, connectionString, containerName }) {
   };
 
   const handleFileSelect = async (file) => {
+    // Stop current playback if any
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      setIsPlaying(false);
+    }
+
     setSelectedFile(file);
     setTranscript(null);
+    setAudioUrl(null);
     setTranscriptLoading(true);
     setError(null);
+    setIsPlaying(false);
 
     try {
       // Get audio URL - try full_path first, then construct from name
@@ -73,6 +83,30 @@ function AudioPlayer({ apiUrl, connectionString, containerName }) {
     } finally {
       setTranscriptLoading(false);
     }
+  };
+
+  const handlePlayPause = () => {
+    if (audioRef.current) {
+      if (isPlaying) {
+        audioRef.current.pause();
+        setIsPlaying(false);
+      } else {
+        audioRef.current.play();
+        setIsPlaying(true);
+      }
+    }
+  };
+
+  const handleAudioEnded = () => {
+    setIsPlaying(false);
+  };
+
+  const handleAudioPlay = () => {
+    setIsPlaying(true);
+  };
+
+  const handleAudioPause = () => {
+    setIsPlaying(false);
   };
 
   return (
@@ -116,12 +150,29 @@ function AudioPlayer({ apiUrl, connectionString, containerName }) {
                 <h4>Now Playing: {selectedFile.name}</h4>
                 {audioUrl ? (
                   <div className="audio-controls">
+                    <div className="play-button-container">
+                      <button 
+                        onClick={handlePlayPause}
+                        className={`play-button ${isPlaying ? 'playing' : ''}`}
+                        disabled={transcriptLoading}
+                      >
+                        {isPlaying ? '⏸️ Pause' : '▶️ Play'}
+                      </button>
+                    </div>
                     <audio
                       ref={audioRef}
                       src={audioUrl}
-                      controls
+                      onEnded={handleAudioEnded}
+                      onPlay={handleAudioPlay}
+                      onPause={handleAudioPause}
                       className="audio-element"
+                      style={{ display: 'none' }}
                     />
+                    <div className="audio-info">
+                      <p className="audio-status">
+                        {isPlaying ? '▶️ Playing' : '⏸️ Paused'}
+                      </p>
+                    </div>
                   </div>
                 ) : transcriptLoading ? (
                   <div className="loading">Loading audio...</div>
