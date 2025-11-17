@@ -433,6 +433,10 @@ def process_blob_audio_files(
     """
     Main function to process audio files from Azure Blob Storage.
     
+    Files are processed in batches of 100 (VoiceGain API limit) to ensure
+    we don't exceed the maximum concurrent requests. Within each batch,
+    files are processed in parallel using ThreadPoolExecutor.
+    
     Args:
         connection_string: Azure Storage connection string
         voicegain_token: VoiceGain API bearer token
@@ -445,7 +449,7 @@ def process_blob_audio_files(
         generate_blob_urls: If True, automatically generate blob URLs with SAS tokens
         max_files: Optional limit on number of files to process (None = process all)
         move_to_processed: If True, move successfully processed files to "Processed" folder
-        max_workers: Number of parallel workers for processing (default: 5)
+        max_workers: Number of parallel workers per batch (default: 5, max recommended: 100)
     """
     logger.info("="*80)
     logger.info("Azure Blob Transcription Processor")
@@ -493,68 +497,91 @@ def process_blob_audio_files(
     
     logger.info("")
     logger.info("="*80)
-    logger.info(f"Starting parallel processing with {max_workers} workers")
+    logger.info(f"Starting batched processing: {max_workers} workers per batch, max 100 files per batch")
     logger.info("="*80)
     logger.info("")
     
-    # Process files in parallel
+    # Process files in batches of 100 (VoiceGain limit)
+    VOICEGAIN_BATCH_SIZE = 100
     successful = 0
     failed = 0
     results = []
+    total_files = len(audio_files)
     
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_file = {
-            executor.submit(
-                process_single_audio_file,
-                audio_file,
-                connection_string,
-                voicegain_token,
-                container_name,
-                output_folder,
-                sas_token,
-                audio_base_url,
-                azure_function_url,
-                generate_blob_urls,
-                move_to_processed,
-                idx,
-                len(audio_files)
-            ): audio_file
-            for idx, audio_file in enumerate(audio_files, 1)
-        }
+    # Process files in batches
+    num_batches = (total_files + VOICEGAIN_BATCH_SIZE - 1) // VOICEGAIN_BATCH_SIZE
+    
+    for batch_num in range(num_batches):
+        batch_start = batch_num * VOICEGAIN_BATCH_SIZE
+        batch_end = min(batch_start + VOICEGAIN_BATCH_SIZE, total_files)
+        batch_files = audio_files[batch_start:batch_end]
         
-        # Process completed tasks as they finish
-        completed = 0
-        for future in as_completed(future_to_file):
-            audio_file = future_to_file[future]
-            try:
-                result = future.result()
-                results.append(result)
-                completed += 1
-                if result.get("success"):
-                    successful += 1
-                    logger.info(f"[Progress: {completed}/{len(audio_files)}] ✓ Success: {audio_file.get('audiopath', 'unknown')}")
-                else:
+        logger.info("")
+        logger.info(f"Processing batch {batch_num + 1}/{num_batches} ({len(batch_files)} files)")
+        logger.info("-" * 80)
+        
+        # Process this batch in parallel (but limited to max_workers)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit tasks for this batch
+            future_to_file = {
+                executor.submit(
+                    process_single_audio_file,
+                    audio_file,
+                    connection_string,
+                    voicegain_token,
+                    container_name,
+                    output_folder,
+                    sas_token,
+                    audio_base_url,
+                    azure_function_url,
+                    generate_blob_urls,
+                    move_to_processed,
+                    batch_start + idx + 1,
+                    total_files
+                ): audio_file
+                for idx, audio_file in enumerate(batch_files)
+            }
+            
+            # Process completed tasks as they finish
+            batch_completed = 0
+            for future in as_completed(future_to_file):
+                audio_file = future_to_file[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    batch_completed += 1
+                    completed = batch_start + batch_completed
+                    if result.get("success"):
+                        successful += 1
+                        logger.info(f"[Progress: {completed}/{total_files}] ✓ Success: {audio_file.get('audiopath', 'unknown')}")
+                    else:
+                        failed += 1
+                        logger.warning(f"[Progress: {completed}/{total_files}] ✗ Failed: {audio_file.get('audiopath', 'unknown')}")
+                except Exception as e:
                     failed += 1
-                    logger.warning(f"[Progress: {completed}/{len(audio_files)}] ✗ Failed: {audio_file.get('audiopath', 'unknown')}")
-            except Exception as e:
-                failed += 1
-                completed += 1
-                logger.exception(f"[Progress: {completed}/{len(audio_files)}] Exception in parallel processing for {audio_file.get('audiopath', 'unknown')}: {e}")
-                results.append({
-                    "audio_path": audio_file.get('audiopath'),
-                    "success": False,
-                    "error": str(e)
-                })
+                    batch_completed += 1
+                    completed = batch_start + batch_completed
+                    logger.exception(f"[Progress: {completed}/{total_files}] Exception in parallel processing for {audio_file.get('audiopath', 'unknown')}: {e}")
+                    results.append({
+                        "audio_path": audio_file.get('audiopath'),
+                        "success": False,
+                        "error": str(e)
+                    })
+        
+        # Wait for batch to complete before starting next batch
+        logger.info(f"Batch {batch_num + 1}/{num_batches} complete. Waiting before next batch...")
+        if batch_num < num_batches - 1:  # Don't wait after last batch
+            time.sleep(2)  # Small delay between batches to avoid overwhelming the system
     
     # Summary
     logger.info("")
     logger.info("="*80)
     logger.info("Processing Complete!")
     logger.info("="*80)
-    logger.info(f"Total files: {len(audio_files)}")
+    logger.info(f"Total files processed: {total_files}")
     logger.info(f"Successful: {successful}")
     logger.info(f"Failed: {failed}")
+    logger.info(f"Success rate: {(successful/total_files*100):.1f}%" if total_files > 0 else "N/A")
     logger.info("="*80)
 
 
