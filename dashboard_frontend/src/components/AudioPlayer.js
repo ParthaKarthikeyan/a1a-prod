@@ -19,6 +19,8 @@ function AudioPlayer({ apiUrl, connectionString, containerName }) {
 
   const fetchAudioFiles = async () => {
     if (!connectionString || connectionString.trim() === '') {
+      setLoading(false);
+      setError('Please configure your blob connection string in the sidebar');
       return;
     }
 
@@ -31,10 +33,11 @@ function AudioPlayer({ apiUrl, connectionString, containerName }) {
         limit: 500
       });
       setAudioFiles(response.data.files || []);
+      setLoading(false);
     } catch (err) {
       console.error('Error fetching audio files:', err);
-      setError(err.response?.data?.error || err.message || 'Failed to fetch audio files');
-    } finally {
+      const errorMessage = err.response?.data?.error || err.message || 'Failed to fetch audio files';
+      setError(errorMessage);
       setLoading(false);
     }
   };
@@ -121,7 +124,9 @@ function AudioPlayer({ apiUrl, connectionString, containerName }) {
       <div className="audio-player-layout">
         <div className="audio-files-list">
           <h4>Processed Audio Files</h4>
-          {loading ? (
+          {!connectionString || connectionString.trim() === '' ? (
+            <div className="error">Please configure your blob connection string in the sidebar</div>
+          ) : loading ? (
             <div className="loading">Loading files...</div>
           ) : error ? (
             <div className="error">{error}</div>

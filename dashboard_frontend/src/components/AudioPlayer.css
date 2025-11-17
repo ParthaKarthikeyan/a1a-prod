@@ -241,10 +241,15 @@
   padding: 20px;
   text-align: center;
   color: #7f8c8d;
+  font-size: 14px;
 }
 
 .error {
   color: #e74c3c;
+  background-color: #fee;
+  border: 1px solid #fcc;
+  border-radius: 4px;
+  margin: 10px 0;
 }
 
 @media (max-width: 1024px) {
