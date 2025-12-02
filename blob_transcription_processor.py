@@ -13,9 +13,64 @@ import json
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
-# Add amp_transcript to path to import TranscriptionWorkflow
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'amp_transcript'))
+# Configure logging first
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Rate limiting: 3750 files per hour (based on 1200 audio hours/hour limit)
+# Average file duration: ~18 minutes (1083 seconds)
+# 3750 files/hour = 62.5 files/minute = ~1.04 files/second
+MAX_FILES_PER_HOUR = 3750
+SECONDS_PER_HOUR = 3600
+MIN_DELAY_BETWEEN_SUBMISSIONS = max(1.0, SECONDS_PER_HOUR / MAX_FILES_PER_HOUR)  # At least 1 second between submissions
+
+# Rate limiter state
+_rate_limiter_lock = Lock()
+_submission_times = []  # Track submission timestamps
+
+
+def wait_for_rate_limit():
+    """Wait if necessary to respect rate limit of 3750 files/hour"""
+    global _submission_times
+    
+    with _rate_limiter_lock:
+        now = time.time()
+        # Remove timestamps older than 1 hour
+        _submission_times = [t for t in _submission_times if now - t < SECONDS_PER_HOUR]
+        
+        # If we've hit the limit, wait until oldest submission is 1 hour old
+        if len(_submission_times) >= MAX_FILES_PER_HOUR:
+            oldest_time = min(_submission_times)
+            wait_time = SECONDS_PER_HOUR - (now - oldest_time) + 1  # Add 1 second buffer
+            if wait_time > 0:
+                logger.info(f"Rate limit reached ({len(_submission_times)}/{MAX_FILES_PER_HOUR} per hour). Waiting {wait_time:.1f}s...")
+                time.sleep(wait_time)
+                # Clean up again after waiting
+                now = time.time()
+                _submission_times = [t for t in _submission_times if now - t < SECONDS_PER_HOUR]
+        
+        # Add current submission time
+        _submission_times.append(time.time())
+        
+        # Small delay between submissions to smooth out the rate
+        time.sleep(MIN_DELAY_BETWEEN_SUBMISSIONS)
+
+# Try to import from amp_transcript_batch first (has batch processing support)
+# Fall back to amp_transcript if batch version not available
+batch_path = os.path.join(os.path.dirname(__file__), 'amp_transcript_batch')
+transcript_path = os.path.join(os.path.dirname(__file__), 'amp_transcript')
+
+if os.path.exists(batch_path):
+    sys.path.insert(0, batch_path)
+    logger.info("Using TranscriptionWorkflow from amp_transcript_batch (batch processing enabled)")
+else:
+    sys.path.insert(0, transcript_path)
+    logger.info("Using TranscriptionWorkflow from amp_transcript")
 
 from azure.storage.blob import (
     BlobServiceClient, 
@@ -24,12 +79,15 @@ from azure.storage.blob import (
 )
 from function_app import TranscriptionWorkflow
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Import job tracker
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'dashboard_backend'))
+try:
+    from voicegain_tracker import submit_job, update_job_polling, complete_job, get_stats
+    TRACKING_ENABLED = True
+except ImportError:
+    TRACKING_ENABLED = False
+    logger.warning("VoiceGain tracker not available - job tracking disabled")
 
 
 class CustomTranscriptionWorkflow(TranscriptionWorkflow):
@@ -54,6 +112,57 @@ class CustomTranscriptionWorkflow(TranscriptionWorkflow):
         self.output_folder = output_folder
         self.raw_transcript_data = None  # Store raw transcript data
     
+    def poll_transcription_status(
+        self,
+        session_url: str,
+        max_iterations: int = 60,
+        delay_seconds: int = 20,
+        job_id: Optional[str] = None
+    ):
+        """Override to add job tracking during polling"""
+        import requests
+        headers = {"Authorization": f"Bearer {self.voicegain_token}"}
+
+        results = ""
+        status = ""
+        iteration_count = 0
+
+        while results != "DONE" and iteration_count < max_iterations:
+            time.sleep(delay_seconds)
+
+            response = requests.get(session_url, headers=headers, timeout=30)
+            response.raise_for_status()
+
+            data = response.json()
+            phase = data.get("progress", {}).get("phase", "")
+            results = phase
+
+            if results == "ERROR":
+                results = "DONE"
+                status = "fail"
+                break
+
+            iteration_count += 1
+            
+            # Track polling progress
+            if TRACKING_ENABLED and job_id:
+                update_job_polling(job_id, phase, iteration_count)
+            
+            logger.info(
+                "Polling session %s iteration %d/%d phase=%s",
+                session_url,
+                iteration_count,
+                max_iterations,
+                phase,
+            )
+
+        if iteration_count >= max_iterations and results != "DONE":
+            status = "timeout"
+            results = "DONE"
+            logger.error("Polling timeout reached for session %s", session_url)
+
+        return results, status
+    
     def process_audio_file(
         self,
         item: Dict[str, Any],
@@ -64,6 +173,7 @@ class CustomTranscriptionWorkflow(TranscriptionWorkflow):
         audio_path = item.get("audiopath")
         audio_url = item.get("audio_url")
         chosen_base_url = base_audio_url or item.get("base_audio_url") or self.audio_base_url
+        job_id = None
 
         response_payload: Dict[str, Any] = {
             "audio_path": audio_path,
@@ -86,13 +196,23 @@ class CustomTranscriptionWorkflow(TranscriptionWorkflow):
                 audio_url = f"{audio_url}{separator}{sas_token}"
             response_payload["audio_url"] = audio_url
 
+            # Wait for rate limit before submitting
+            wait_for_rate_limit()
+            
+            # Submit to VoiceGain
             transcription_response = self.submit_transcription_request(audio_url)
             if transcription_response is None:
                 response_payload["status"] = "rate_limited"
+                # Don't track rate-limited requests - they weren't actually submitted
+                # This prevents inflating the submission count
                 return response_payload
 
+            # Track the job submission (only for successful submissions)
+            if TRACKING_ENABLED:
+                job_id = submit_job(audio_path or "unknown", audio_url, transcription_response)
+
             self.session_url = transcription_response["sessions"][0]["sessionUrl"]
-            results_phase, status = self.poll_transcription_status(self.session_url)
+            results_phase, status = self.poll_transcription_status(self.session_url, job_id=job_id)
             response_payload["status"] = status or results_phase
 
             if status in {"fail", "timeout"}:
@@ -101,6 +221,8 @@ class CustomTranscriptionWorkflow(TranscriptionWorkflow):
                     status,
                     audio_path or audio_url,
                 )
+                if TRACKING_ENABLED and job_id:
+                    complete_job(job_id, False, f"Transcription {status}")
                 return response_payload
 
             # Get raw transcript data
@@ -116,6 +238,11 @@ class CustomTranscriptionWorkflow(TranscriptionWorkflow):
             )
             response_payload["transcript_blob_path"] = blob_path
             response_payload["success"] = True
+            
+            # Mark job as completed
+            if TRACKING_ENABLED and job_id:
+                complete_job(job_id, True)
+            
             return response_payload
 
         except Exception as exc:  # pylint: disable=broad-except
@@ -125,6 +252,8 @@ class CustomTranscriptionWorkflow(TranscriptionWorkflow):
                 audio_path or audio_url or "<unknown>",
                 exc,
             )
+            if TRACKING_ENABLED and job_id:
+                complete_job(job_id, False, str(exc))
             return response_payload
     
     def save_transcript_to_blob(self, transcript_text: str, audio_identifier: str, raw_transcript_data: Optional[Dict[str, Any]] = None) -> Optional[str]:
@@ -207,8 +336,14 @@ def list_audio_files_from_blob(
         audio_files = []
         blob_list = container_client.list_blobs(name_starts_with=prefix)
         
+        # Exclude files that are already processed (in Archive or Processed folders)
+        exclude_prefixes = ['Archive/', 'Processed/', 'Transcripts/']
+        
         for blob in blob_list:
             blob_name = blob.name.lower()
+            # Skip files in Archive, Processed, or Transcripts folders
+            if any(blob.name.startswith(exclude) for exclude in exclude_prefixes):
+                continue
             if any(blob_name.endswith(ext) for ext in audio_extensions):
                 audio_files.append({
                     "audiopath": blob.name,  # Use full blob name as path
@@ -227,16 +362,16 @@ def move_blob_to_processed(
     connection_string: str,
     container_name: str,
     blob_name: str,
-    processed_folder: str = "Processed"
+    processed_folder: str = "Archive"
 ) -> Optional[str]:
     """
-    Move a blob to the "Processed" folder after successful transcription.
+    Move a blob to the "Archive" folder after successful transcription.
     
     Args:
         connection_string: Azure Storage connection string
         container_name: Name of the container
         blob_name: Name/path of the blob to move
-        processed_folder: Folder name for processed files (default: "Processed")
+        processed_folder: Folder name for archived audio files (default: "Archive")
         
     Returns:
         New blob path if successful, None otherwise
@@ -433,9 +568,10 @@ def process_blob_audio_files(
     """
     Main function to process audio files from Azure Blob Storage.
     
-    Files are processed in batches of 100 (VoiceGain API limit) to ensure
+    Files are processed in batches of 200 (VoiceGain API rate limit: 1200 hrs/hr) to ensure
     we don't exceed the maximum concurrent requests. Within each batch,
-    files are processed in parallel using ThreadPoolExecutor.
+    ALL files are processed in parallel (up to 200 simultaneous requests).
+    Batches are processed sequentially to respect API rate limits.
     
     Args:
         connection_string: Azure Storage connection string
@@ -449,7 +585,7 @@ def process_blob_audio_files(
         generate_blob_urls: If True, automatically generate blob URLs with SAS tokens
         max_files: Optional limit on number of files to process (None = process all)
         move_to_processed: If True, move successfully processed files to "Processed" folder
-        max_workers: Number of parallel workers per batch (default: 5, max recommended: 100)
+        max_workers: DEPRECATED - now uses batch size (100) for parallel processing
     """
     logger.info("="*80)
     logger.info("Azure Blob Transcription Processor")
@@ -497,32 +633,53 @@ def process_blob_audio_files(
     
     logger.info("")
     logger.info("="*80)
-    logger.info(f"Starting batched processing: {max_workers} workers per batch, max 100 files per batch")
+    logger.info(f"Starting batched processing: 200 files per batch (with rate limiting)")
     logger.info("="*80)
     logger.info("")
     
-    # Process files in batches of 100 (VoiceGain limit)
-    VOICEGAIN_BATCH_SIZE = 100
+    # Process files in batches of 200 (VoiceGain API rate limit: 1200 hrs/hr)
+    # Within each batch, files are processed with rate limiting (3750 files/hour)
+    # Batches are processed sequentially to respect API limits
+    # Reduced from 1500 due to high failure rate - adaptive rate limiting will adjust if needed
+    VOICEGAIN_BATCH_SIZE = 200
+    MIN_BATCH_SIZE = 10  # Minimum batch size for adaptive rate limiting
     successful = 0
     failed = 0
+    rate_limited = 0  # Track rate-limited requests
     results = []
     total_files = len(audio_files)
     
-    # Process files in batches
-    num_batches = (total_files + VOICEGAIN_BATCH_SIZE - 1) // VOICEGAIN_BATCH_SIZE
+    # Adaptive rate limiting: track 429 errors and adjust batch size
+    current_batch_size = VOICEGAIN_BATCH_SIZE
+    batch_429_count = 0  # Count 429 errors in current batch
+    batch_total_requests = 0  # Total requests in current batch
     
-    for batch_num in range(num_batches):
-        batch_start = batch_num * VOICEGAIN_BATCH_SIZE
-        batch_end = min(batch_start + VOICEGAIN_BATCH_SIZE, total_files)
+    # Process files in batches
+    num_batches = (total_files + current_batch_size - 1) // current_batch_size
+    
+    batch_num = 0
+    batch_start = 0
+    
+    while batch_start < total_files:
+        # Recalculate number of batches with current batch size
+        num_batches = (total_files + current_batch_size - 1) // current_batch_size
+        batch_end = min(batch_start + current_batch_size, total_files)
         batch_files = audio_files[batch_start:batch_end]
+        batch_size = len(batch_files)
+        
+        # Reset batch statistics
+        batch_429_count = 0
+        batch_total_requests = 0
         
         logger.info("")
-        logger.info(f"Processing batch {batch_num + 1}/{num_batches} ({len(batch_files)} files)")
+        logger.info(f"Processing batch {batch_num + 1}/{num_batches} (items {batch_start + 1}-{batch_end} of {total_files}, batch size: {current_batch_size})")
         logger.info("-" * 80)
         
-        # Process this batch in parallel (but limited to max_workers)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit tasks for this batch
+        # Process ALL items in this batch in parallel
+        # Use max_workers equal to batch size to process all items simultaneously
+        batch_workers = min(batch_size, current_batch_size)
+        with ThreadPoolExecutor(max_workers=batch_workers) as executor:
+            # Submit all tasks for this batch
             future_to_file = {
                 executor.submit(
                     process_single_audio_file,
@@ -550,7 +707,14 @@ def process_blob_audio_files(
                     result = future.result()
                     results.append(result)
                     batch_completed += 1
+                    batch_total_requests += 1
                     completed = batch_start + batch_completed
+                    
+                    # Track rate-limited requests
+                    if result.get("status") == "rate_limited" or (result.get("error") and "rate" in result.get("error", "").lower()):
+                        rate_limited += 1
+                        batch_429_count += 1
+                    
                     if result.get("success"):
                         successful += 1
                         logger.info(f"[Progress: {completed}/{total_files}] ✓ Success: {audio_file.get('audiopath', 'unknown')}")
@@ -560,6 +724,7 @@ def process_blob_audio_files(
                 except Exception as e:
                     failed += 1
                     batch_completed += 1
+                    batch_total_requests += 1
                     completed = batch_start + batch_completed
                     logger.exception(f"[Progress: {completed}/{total_files}] Exception in parallel processing for {audio_file.get('audiopath', 'unknown')}: {e}")
                     results.append({
@@ -568,10 +733,40 @@ def process_blob_audio_files(
                         "error": str(e)
                     })
         
+        # Adaptive rate limiting: adjust batch size based on 429 error rate
+        rate_429_percentage = 0.0
+        if batch_total_requests > 0:
+            rate_429_percentage = (batch_429_count / batch_total_requests) * 100
+            if rate_429_percentage > 5.0:  # If more than 5% of requests are rate-limited
+                # Reduce batch size by 25% (minimum MIN_BATCH_SIZE)
+                new_batch_size = max(MIN_BATCH_SIZE, int(current_batch_size * 0.75))
+                if new_batch_size < current_batch_size:
+                    logger.warning(
+                        f"Rate limiting detected: {rate_429_percentage:.1f}% of requests rate-limited. "
+                        f"Reducing batch size from {current_batch_size} to {new_batch_size}"
+                    )
+                    current_batch_size = new_batch_size
+            elif rate_429_percentage == 0.0 and current_batch_size < VOICEGAIN_BATCH_SIZE:
+                # Gradually increase batch size if no rate limiting (up to original size)
+                new_batch_size = min(VOICEGAIN_BATCH_SIZE, int(current_batch_size * 1.1))
+                if new_batch_size > current_batch_size:
+                    logger.info(
+                        f"No rate limiting detected. Increasing batch size from {current_batch_size} to {new_batch_size}"
+                    )
+                    current_batch_size = new_batch_size
+        
         # Wait for batch to complete before starting next batch
-        logger.info(f"Batch {batch_num + 1}/{num_batches} complete. Waiting before next batch...")
-        if batch_num < num_batches - 1:  # Don't wait after last batch
-            time.sleep(2)  # Small delay between batches to avoid overwhelming the system
+        logger.info(
+            f"Completed batch {batch_num + 1} - {batch_completed} items processed "
+            f"(429 errors: {batch_429_count}/{batch_total_requests}, {rate_429_percentage:.1f}%)"
+        )
+        
+        batch_num += 1
+        batch_start = batch_end
+        
+        if batch_start < total_files:  # Don't wait after last batch
+            logger.info("Waiting 10 seconds before starting next batch...")
+            time.sleep(10)  # Delay between batches to give VoiceGain time to process requests
     
     # Summary
     logger.info("")
@@ -581,8 +776,63 @@ def process_blob_audio_files(
     logger.info(f"Total files processed: {total_files}")
     logger.info(f"Successful: {successful}")
     logger.info(f"Failed: {failed}")
+    logger.info(f"Rate-limited: {rate_limited}")
     logger.info(f"Success rate: {(successful/total_files*100):.1f}%" if total_files > 0 else "N/A")
+    if total_files > 0:
+        logger.info(f"Rate limiting rate: {(rate_limited / total_files) * 100:.1f}%")
     logger.info("="*80)
+    
+    # Trigger taxonomy processing if transcripts were created
+    if successful > 0:
+        logger.info("")
+        logger.info("Triggering taxonomy processing for new transcripts...")
+        try:
+            run_taxonomy_processor(connection_string, container_name, output_folder)
+        except Exception as e:
+            logger.error(f"Taxonomy processing failed: {e}")
+
+
+def run_taxonomy_processor(
+    connection_string: str,
+    container_name: str,
+    transcripts_folder: str = "Transcripts"
+):
+    """
+    Run taxonomy processing on newly created transcripts.
+    
+    Args:
+        connection_string: Azure Storage connection string
+        container_name: Name of the container
+        transcripts_folder: Folder where transcripts are stored
+    """
+    try:
+        # Import taxonomy processor
+        from taxonomy_processor import BlobTranscriptTagger
+        
+        logger.info("="*80)
+        logger.info("Starting Taxonomy Processing")
+        logger.info("="*80)
+        
+        # Create taxonomy processor
+        processor = BlobTranscriptTagger(
+            connection_string=connection_string,
+            container_name=container_name,
+            transcripts_folder=f"{transcripts_folder}/formatted",
+            taxonomy_file="D:\\A1A\\A1A Taxonomy.xlsx",
+            output_folder="Processed"
+        )
+        
+        # Process all transcripts
+        processor.process_all_transcripts()
+        
+        logger.info("Taxonomy processing completed successfully!")
+        
+    except ImportError as e:
+        logger.error(f"Could not import taxonomy_processor: {e}")
+        logger.error("Make sure taxonomy_processor.py is in the same directory")
+    except Exception as e:
+        logger.error(f"Error running taxonomy processor: {e}")
+        raise
 
 
 def main():
@@ -617,8 +867,8 @@ def main():
     AZURE_FUNCTION_URL = os.getenv("AZURE_FUNCTION_URL")  # Optional Azure Function URL
     MAX_FILES = os.getenv("MAX_FILES")  # Optional limit on number of files to process
     MAX_FILES = int(MAX_FILES) if MAX_FILES else None
-    MAX_WORKERS = os.getenv("MAX_WORKERS", "5")  # Number of parallel workers
-    MAX_WORKERS = int(MAX_WORKERS) if MAX_WORKERS else 5
+    # Note: max_workers parameter is now deprecated - batch processing uses 200 parallel workers per batch
+    # This matches the VoiceGain API rate limit of 1200 hrs/hr (increased from 100 hrs/hr)
     
     # Run the processor
     process_blob_audio_files(
@@ -632,7 +882,7 @@ def main():
         azure_function_url=AZURE_FUNCTION_URL,
         max_files=MAX_FILES,
         move_to_processed=True,  # Move successfully processed files to Processed folder
-        max_workers=MAX_WORKERS  # Parallel processing workers
+        max_workers=4000  # Process all 4000 items in batch in parallel
     )
 
 
